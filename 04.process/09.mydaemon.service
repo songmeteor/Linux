@@ -1,0 +1,9 @@
+[Unit]
+Description=Mydaemon testing via by systemd
+[Service]
+ExecStart=/usr/local/bin/09.mydaemon-systemd
+Restart=on-failure
+Type=forking
+PIDFile=/run/mydaemon.pid
+[Install]
+WantedBy=multi-user.target

@@ -6,7 +6,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <locale.h>
 #include <time.h>
 #include <errno.h>
 
@@ -27,19 +26,25 @@ typedef struct {
 typedef enum { PHASE_DAY, PHASE_VOTE } Phase;
 
 // 전역 변수
-Client       clients[MAX_CLIENTS];
-pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-Phase        phase        = PHASE_DAY;
-int          game_started = 0;
+Client            clients[MAX_CLIENTS];
+pthread_mutex_t   clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+Phase             phase         = PHASE_DAY;
+int               game_started  = 0;
 
-pthread_t    day_timer_tid; // 낮 타이머 스레드
+pthread_t         day_timer_tid; // 낮 타이머 스레드
 
 // 함수 선언
 void broadcast_message(const char *message, int sender_sock);
 
-// 낮 타이머: 180초 후 투표 단계로 전환
+// 낮 타이머: 3분(180초) 동안 경고 후 투표 단계로 전환
 void *day_timer(void *arg) {
-    sleep(180);
+    sleep(60);
+    broadcast_message("[주의] 낮 시간이 2분 남았습니다.\n\n", -1);
+    sleep(60);
+    broadcast_message("[주의] 낮 시간이 1분 남았습니다.\n\n", -1);
+    sleep(30);
+    broadcast_message("[주의] 낮 시간이 30초 남았습니다.\n\n", -1);
+    sleep(30);
     pthread_mutex_lock(&clients_mutex);
     phase = PHASE_VOTE;
     pthread_mutex_unlock(&clients_mutex);
@@ -47,7 +52,7 @@ void *day_timer(void *arg) {
     return NULL;
 }
 
-// 전체 클라이언트에 메시지 브로드캐스트 (sender_sock < 0 이면 모두에게)
+// 전체 클라이언트에 메시지 브로드캐스트
 void broadcast_message(const char *message, int sender_sock) {
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -106,8 +111,6 @@ void *handle_client(void *arg) {
     if (!game_started && current_count == REQUIRED_PLAYERS) {
         game_started = 1;
         do_broadcast = 1;
-
-        // 역할 셔플 및 개별 전송
         const char *roles[REQUIRED_PLAYERS] = {"마피아","시민","시민","의사","경찰"};
         srand((unsigned)time(NULL));
         for (int i = REQUIRED_PLAYERS - 1; i > 0; --i) {
@@ -138,7 +141,6 @@ void *handle_client(void *arg) {
     // 6) 메시지 (채팅/투표) 루프
     while ((bytes_received = recv(client_sock, buffer, sizeof(buffer), 0)) > 0) {
         buffer[bytes_received] = '\0';
-        // 개행 제거
         size_t len = strlen(buffer);
         if (len > 0 && buffer[len-1] == '\n') buffer[--len] = '\0';
         if (len > 0 && buffer[len-1] == '\r') buffer[--len] = '\0';
@@ -148,12 +150,10 @@ void *handle_client(void *arg) {
         pthread_mutex_unlock(&clients_mutex);
 
         if (cur == PHASE_DAY) {
-            // 낮: 일반 채팅
             char full_msg[FULL_MSG_SZ];
             snprintf(full_msg, sizeof(full_msg), "[%s] %s\n\n", nickname, buffer);
             broadcast_message(full_msg, client_sock);
         } else {
-            // 투표 단계: '/vote 닉네임'
             if (strncmp(buffer, "/vote ", 6) == 0) {
                 char target[NICKNAME_LEN];
                 strncpy(target, buffer + 6, NICKNAME_LEN);
@@ -185,8 +185,6 @@ void *handle_client(void *arg) {
 }
 
 int main() {
-    setlocale(LC_ALL, "");
-
     int server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock < 0) { perror("socket 생성 실패"); exit(EXIT_FAILURE); }
 

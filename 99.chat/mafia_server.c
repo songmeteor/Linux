@@ -11,21 +11,43 @@
 #include <errno.h>
 
 #define MAX_CLIENTS       100
-#define REQUIRED_PLAYERS  5         // <<< 게임 시작에 필요한 인원 수
+#define REQUIRED_PLAYERS  5    // 게임 시작에 필요한 인원 수
 #define BUFFER_SZ         2048
 #define NICKNAME_LEN      32
 #define FULL_MSG_SZ       (BUFFER_SZ + NICKNAME_LEN + 16)
 #define PORT              8888
 
+// 클라이언트 구조체
 typedef struct {
     int  socket;
     char nickname[NICKNAME_LEN];
 } Client;
 
-Client clients[MAX_CLIENTS];
-pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-int game_started = 0;
+// 게임 단계 정의
+typedef enum { PHASE_DAY, PHASE_VOTE } Phase;
 
+// 전역 변수
+Client       clients[MAX_CLIENTS];
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+Phase        phase        = PHASE_DAY;
+int          game_started = 0;
+
+pthread_t    day_timer_tid; // 낮 타이머 스레드
+
+// 함수 선언
+void broadcast_message(const char *message, int sender_sock);
+
+// 낮 타이머: 180초 후 투표 단계로 전환
+void *day_timer(void *arg) {
+    sleep(180);
+    pthread_mutex_lock(&clients_mutex);
+    phase = PHASE_VOTE;
+    pthread_mutex_unlock(&clients_mutex);
+    broadcast_message("[낮이 종료되었습니다. 투표 시간을 시작합니다.]\n\n", -1);
+    return NULL;
+}
+
+// 전체 클라이언트에 메시지 브로드캐스트 (sender_sock < 0 이면 모두에게)
 void broadcast_message(const char *message, int sender_sock) {
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -39,6 +61,7 @@ void broadcast_message(const char *message, int sender_sock) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
+// 클라이언트 처리 스레드
 void *handle_client(void *arg) {
     int client_sock = *((int*)arg);
     free(arg);
@@ -47,7 +70,7 @@ void *handle_client(void *arg) {
     char nickname[NICKNAME_LEN];
     int bytes_received;
 
-    // 닉네임 수신
+    // 1) 닉네임 수신
     bytes_received = recv(client_sock, nickname, NICKNAME_LEN, 0);
     if (bytes_received <= 0) {
         perror("recv(nickname) 실패 또는 연결 종료");
@@ -56,8 +79,8 @@ void *handle_client(void *arg) {
     }
     nickname[bytes_received - 1] = '\0';
 
-    // 클라이언트 리스트에 등록 및 현재 접속자 수 계산
-    int current_count = 0;  // <<< 수정된 부분: 입장 시 현재 인원 세기
+    // 2) 클라이언트 등록 및 현재 접속자 수 계산
+    int current_count = 0;
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         if (clients[i].socket == 0) {
@@ -71,65 +94,80 @@ void *handle_client(void *arg) {
     }
     pthread_mutex_unlock(&clients_mutex);
 
-    // <<< 수정된 부분: 입장 메시지에 (현재/5) 추가 >>>
+    // 3) 입장 메시지 (현재/최대)
     snprintf(buffer, sizeof(buffer),
              "[%s] 님이 입장했습니다. (%d/%d)\n\n",
              nickname, current_count, REQUIRED_PLAYERS);
     broadcast_message(buffer, client_sock);
 
-    // 역할 배정 체크
+    // 4) 역할 배정 체크 및 배정
     int do_broadcast = 0;
     pthread_mutex_lock(&clients_mutex);
-    if (!game_started) {
-        if (current_count == REQUIRED_PLAYERS) {
-            game_started = 1;
-            do_broadcast = 1;
-            // 역할 셔플 및 개별 전송
-            const char *roles[REQUIRED_PLAYERS] = {"마피아","시민","시민","의사","경찰"};
-            srand((unsigned)time(NULL));
-            for (int i = REQUIRED_PLAYERS - 1; i > 0; --i) {
-                int j = rand() % (i + 1);
-                const char *tmp = roles[i];
-                roles[i] = roles[j];
-                roles[j] = tmp;
-            }
-            int r = 0;
-            for (int i = 0; i < MAX_CLIENTS && r < REQUIRED_PLAYERS; ++i) {
-                if (clients[i].socket > 0) {
-                    char role_msg[BUFFER_SZ];
-                    snprintf(role_msg, sizeof(role_msg),
-                             "[역할] %s 님은 \"%s\"입니다.\n",
-                             clients[i].nickname, roles[r++]);
-                    if (send(clients[i].socket, role_msg, strlen(role_msg), 0) < 0)
-                        perror("send(역할) 실패");
-                }
+    if (!game_started && current_count == REQUIRED_PLAYERS) {
+        game_started = 1;
+        do_broadcast = 1;
+
+        // 역할 셔플 및 개별 전송
+        const char *roles[REQUIRED_PLAYERS] = {"마피아","시민","시민","의사","경찰"};
+        srand((unsigned)time(NULL));
+        for (int i = REQUIRED_PLAYERS - 1; i > 0; --i) {
+            int j = rand() % (i + 1);
+            const char *tmp = roles[i]; roles[i] = roles[j]; roles[j] = tmp;
+        }
+        int r = 0;
+        for (int i = 0; i < MAX_CLIENTS && r < REQUIRED_PLAYERS; ++i) {
+            if (clients[i].socket > 0) {
+                char role_msg[BUFFER_SZ];
+                snprintf(role_msg, sizeof(role_msg),
+                         "[역할] %s 님은 \"%s\"입니다.\n",
+                         clients[i].nickname, roles[r++]);
+                if (send(clients[i].socket, role_msg, strlen(role_msg), 0) < 0)
+                    perror("send(역할) 실패");
             }
         }
     }
     pthread_mutex_unlock(&clients_mutex);
 
-    // 역할 배정 후 전체 알림
+    // 5) 역할 배정 후 전체 알림 및 낮 타이머 시작
     if (do_broadcast) {
         broadcast_message("[게임 시작] 역할이 배정되었습니다!\n\n", -1);
+        pthread_create(&day_timer_tid, NULL, day_timer, NULL);
+        pthread_detach(day_timer_tid);
     }
 
-    // 채팅 루프
+    // 6) 메시지 (채팅/투표) 루프
     while ((bytes_received = recv(client_sock, buffer, sizeof(buffer), 0)) > 0) {
         buffer[bytes_received] = '\0';
-        // 메시지 끝 개행 제거
+        // 개행 제거
         size_t len = strlen(buffer);
         if (len > 0 && buffer[len-1] == '\n') buffer[--len] = '\0';
         if (len > 0 && buffer[len-1] == '\r') buffer[--len] = '\0';
-        // 두 줄 개행 추가
-        char full_msg[FULL_MSG_SZ];
-        snprintf(full_msg, sizeof(full_msg), "[%s] %s\n\n", nickname, buffer);
-        broadcast_message(full_msg, client_sock);
-    }
-    if (bytes_received < 0) {
-        perror("recv(메시지) 실패");
-    }
 
-    // 퇴장 처리
+        pthread_mutex_lock(&clients_mutex);
+        Phase cur = phase;
+        pthread_mutex_unlock(&clients_mutex);
+
+        if (cur == PHASE_DAY) {
+            // 낮: 일반 채팅
+            char full_msg[FULL_MSG_SZ];
+            snprintf(full_msg, sizeof(full_msg), "[%s] %s\n\n", nickname, buffer);
+            broadcast_message(full_msg, client_sock);
+        } else {
+            // 투표 단계: '/vote 닉네임'
+            if (strncmp(buffer, "/vote ", 6) == 0) {
+                char target[NICKNAME_LEN];
+                strncpy(target, buffer + 6, NICKNAME_LEN);
+                char vote_msg[BUFFER_SZ];
+                snprintf(vote_msg, sizeof(vote_msg),
+                         "[투표] %s 님이 %s 님에게 투표했습니다.\n\n",
+                         nickname, target);
+                broadcast_message(vote_msg, -1);
+            }
+        }
+    }
+    if (bytes_received < 0) perror("recv(메시지) 실패");
+
+    // 7) 퇴장 처리
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         if (clients[i].socket == client_sock) {

@@ -1,0 +1,10 @@
+{
+    "terminal.integrated.defaultEncoding": "utf8",
+    "terminal.integrated.env.linux": {
+        "LANG": "ko_KR.UTF-8",
+        "LC_ALL": "ko_KR.UTF-8"
+    },
+    "terminal.integrated.fontFamily": "D2Coding",
+    "files.encoding": "utf8",
+    "editor.fontFamily": "D2Coding"
+}

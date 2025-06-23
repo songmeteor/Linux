@@ -184,7 +184,19 @@ void* game_loop(void* arg) {
             }
             broadcast_alive(list);
         } else if (phase == PHASE_DAY) {
-            sleep(120); // 낮 채팅 시간 2분
+            int elapsed = 0;
+            pthread_mutex_unlock(&game_mutex); // 낮 시작 시 바로 뮤텍스 해제
+            while (elapsed < 600) { // 0.2초 * 600 = 120초(2분)
+                usleep(200000); // 0.2초
+                pthread_mutex_lock(&game_mutex);
+                if (phase != PHASE_DAY) {
+                    pthread_mutex_unlock(&game_mutex);
+                    break;
+                }
+                pthread_mutex_unlock(&game_mutex);
+                elapsed++;
+            }
+            pthread_mutex_lock(&game_mutex); // 낮 끝나고 다시 뮤텍스 획득
             phase = PHASE_VOTE;
             reset_votes();
             broadcast_alive("[안내] 투표 시간입니다. 처형할 플레이어 번호를 입력하세요.\n");
@@ -201,12 +213,14 @@ void* game_loop(void* arg) {
             process_vote();
             int alive_arr[MAX_CLIENTS];
             for (size_t i = 0; i < num_players; ++i) alive_arr[i] = players[i].alive;
-            int result = check_win_condition(&players[0].role, alive_arr, num_players);
-            if (result == 1) {
+            int mafia = 0, citizen = 0;
+            for (size_t i = 0; i < num_players; ++i) {
+                if (!alive_arr[i]) continue;
+                if (players[i].role == ROLE_MAFIA) mafia++;
+                else citizen++;
+            }
+            if (mafia == 0) {
                 broadcast_alive("[안내] 시민팀 승리!\n");
-                phase = PHASE_END;
-            } else if (result == 2) {
-                broadcast_alive("[안내] 마피아팀 승리!\n");
                 phase = PHASE_END;
             } else {
                 phase = PHASE_NIGHT;

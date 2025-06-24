@@ -46,6 +46,7 @@ void add_player(int fd, const char* nickname);
 void remove_player(int fd);
 void* game_loop(void* arg);
 void broadcast_message(const char* msg, int except_fd);
+void print_player();
 
 void reset_night_actions() {
     mafia_target = -1;
@@ -108,9 +109,10 @@ void process_night() {
         players[mafia_target].alive = 0;
         char msg[128];
         snprintf(msg, sizeof(msg), "[안내] 밤에 %s님이 사망했습니다.\n", players[mafia_target].nickname);
-        broadcast_alive(msg);
+        broadcast_message(msg,-1);
+        remove_player(players[mafia_target].fd);
     } else {
-        broadcast_alive("[안내] 밤에 아무도 사망하지 않았습니다.\n");
+        broadcast_message("[안내] 밤에 아무도 사망하지 않았습니다.\n",-1);
     }
     // 경찰 결과 안내
     if (police_target >= 0) {
@@ -132,15 +134,28 @@ void process_vote() {
         players[out_idx].alive = 0;
         char msg[128];
         snprintf(msg, sizeof(msg), "[안내] 투표 결과 %s님이 처형되었습니다.\n", players[out_idx].nickname);
-        broadcast_alive(msg);
+        broadcast_message(msg,-1);
+        remove_player(players[out_idx].fd);
     } else {
-        broadcast_alive("[안내] 투표 결과 아무도 처형되지 않았습니다.\n");
+        broadcast_message("[안내] 투표 결과 아무도 처형되지 않았습니다.\n",-1);
     }
 }
 
 void send_to_player(size_t idx, const char* msg) {
     if (players[idx].alive)
         send(players[idx].fd, msg, strlen(msg), 0);
+}
+
+// 플레이어 리스트 출력
+void print_player()
+{
+    char list[512] = "[안내] 플레이어 목록:\n";
+    for (size_t i = 0; i < num_players; ++i) {
+        char entry[64];
+        snprintf(entry, sizeof(entry), "%zu: %s\n", i, players[i].nickname);
+        strncat(list, entry, sizeof(list) - strlen(list) - 1);
+    }
+    broadcast_alive(list);  
 }
 
 // 게임 상태 전환 및 진행(밤/낮/투표/승패)
@@ -162,27 +177,12 @@ void* game_loop(void* arg) {
             // 낮부터 시작
             phase = PHASE_DAY;
             broadcast_alive("[안내] 게임이 시작되었습니다! 낮이 되었습니다. 모두 채팅 가능합니다.\n");
-            // 플레이어 목록 안내
-            char list[512] = "[안내] 플레이어 목록:\n";
-            for (size_t i = 0; i < num_players; ++i) {
-                char entry[64];
-                snprintf(entry, sizeof(entry), "%zu: %s\n", i, players[i].nickname);
-                strncat(list, entry, sizeof(list) - strlen(list) - 1);
-            }
-            broadcast_alive(list);
+            print_player();
         } else if (phase == PHASE_NIGHT && all_night_actions_done()) {
             process_night();
             phase = PHASE_DAY;
             broadcast_alive("[안내] 낮이 되었습니다. 모두 채팅 가능합니다.\n");
-            // 플레이어 목록 안내
-            char list[512] = "[안내] 플레이어 목록:\n";
-            for (size_t i = 0; i < num_players; ++i) {
-                if (!players[i].alive) continue;
-                char entry[64];
-                snprintf(entry, sizeof(entry), "%zu: %s\n", i, players[i].nickname);
-                strncat(list, entry, sizeof(list) - strlen(list) - 1);
-            }
-            broadcast_alive(list);
+            print_player();
         } else if (phase == PHASE_DAY) {
             int elapsed = 0;
             pthread_mutex_unlock(&game_mutex); // 낮 시작 시 바로 뮤텍스 해제
@@ -194,21 +194,15 @@ void* game_loop(void* arg) {
                     break;
                 }
                 pthread_mutex_unlock(&game_mutex);
+                if(elapsed == 300) broadcast_alive("\n ❗️투표까지 1분 남았습니다❗️\n");
+                if(elapsed == 450) broadcast_alive("\n ❗️투표까지 30초 남았습니다❗️\n");
                 elapsed++;
             }
             pthread_mutex_lock(&game_mutex); // 낮 끝나고 다시 뮤텍스 획득
             phase = PHASE_VOTE;
             reset_votes();
             broadcast_alive("[안내] 투표 시간입니다. 처형할 플레이어 번호를 입력하세요.\n");
-            // 플레이어 목록 안내
-            char list[512] = "[안내] 플레이어 목록:\n";
-            for (size_t i = 0; i < num_players; ++i) {
-                if (!players[i].alive) continue;
-                char entry[64];
-                snprintf(entry, sizeof(entry), "%zu: %s\n", i, players[i].nickname);
-                strncat(list, entry, sizeof(list) - strlen(list) - 1);
-            }
-            broadcast_alive(list);
+            print_player();
         } else if (phase == PHASE_VOTE && all_votes_done()) {
             process_vote();
             int alive_arr[MAX_CLIENTS];
@@ -220,21 +214,13 @@ void* game_loop(void* arg) {
                 else citizen++;
             }
             if (mafia == 0) {
-                broadcast_alive("[안내] 시민팀 승리!\n");
+                broadcast_message("[안내] 시민팀 승리!\n",-1);
                 phase = PHASE_END;
             } else {
                 phase = PHASE_NIGHT;
                 reset_night_actions();
                 broadcast_alive("[안내] 밤이 되었습니다. 마피아/경찰/의사는 행동을 입력하세요.\n");
-                // 플레이어 목록 안내(밤 행동용)
-                char list[512] = "[안내] 플레이어 목록:\n";
-                for (size_t i = 0; i < num_players; ++i) {
-                    if (!players[i].alive) continue;
-                    char entry[64];
-                    snprintf(entry, sizeof(entry), "%zu: %s\n", i, players[i].nickname);
-                    strncat(list, entry, sizeof(list) - strlen(list) - 1);
-                }
-                broadcast_alive(list);
+                print_player();
                 for (size_t i = 0; i < num_players; ++i) {
                     if (players[i].role == ROLE_MAFIA && players[i].alive)
                         send_to_player(i, "[행동] 밤입니다. 죽일 플레이어 번호를 입력하세요.\n");
@@ -245,7 +231,7 @@ void* game_loop(void* arg) {
                 }
             }
         } else if (phase == PHASE_END) {
-            broadcast_alive("[안내] 게임이 종료되었습니다.\n");
+            broadcast_message("[안내] 게임이 종료되었습니다.\n",-1);
             pthread_mutex_unlock(&game_mutex);
             break;
         }

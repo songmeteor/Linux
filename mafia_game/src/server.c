@@ -15,7 +15,7 @@
 #define MAX_CLIENTS 10
 #define MIN_PLAYERS 5
 
-typedef enum { PHASE_WAIT, PHASE_NIGHT, PHASE_DAY, PHASE_VOTE, PHASE_END } phase_t;
+typedef enum { PHASE_WAIT, PHASE_NIGHT, PHASE_DAY, PHASE_VOTE, PHASE_ARG, PHASE_FINAL_VOTE, PHASE_END } phase_t;
 
 typedef struct {
     int fd;
@@ -25,6 +25,7 @@ typedef struct {
     int vote; // 투표 대상 인덱스
 } player_t;
 
+static int vote_ret = -1;
 static player_t players[MAX_CLIENTS];
 static size_t num_players = 0;
 static phase_t phase = PHASE_WAIT;
@@ -126,18 +127,36 @@ void process_night() {
 }
 
 // 투표 집계 및 처리
-void process_vote() {
+int process_vote() {
     int votes[MAX_CLIENTS];
     for (size_t i = 0; i < num_players; ++i) votes[i] = players[i].vote;
     int out_idx = tally_votes(votes, num_players);
     if (out_idx >= 0) {
-        players[out_idx].alive = 0;
         char msg[128];
-        snprintf(msg, sizeof(msg), "[안내] 투표 결과 %s님이 처형되었습니다.\n", players[out_idx].nickname);
+        snprintf(msg, sizeof(msg), "[안내] 투표 결과 %s님이 지목되었습니다.\n", players[out_idx].nickname);
         broadcast_message(msg,-1);
-        remove_player(players[out_idx].fd);
     } else {
-        broadcast_message("[안내] 투표 결과 아무도 처형되지 않았습니다.\n",-1);
+        broadcast_message("[안내] 투표 결과 아무도 지목되지 않았습니다.\n",-1);
+    }
+     return out_idx;
+}
+
+void process_final_vote(int vote_idx){
+    int count_0 = 0;
+    int count_1 = 0;
+    int votes[num_players-1];
+    for (size_t i = 0; i < num_players; ++i) votes[i] = players[i].vote;
+    for(size_t i = 0; i < num_players; ++i){
+        if(votes[i]) count_1++;
+        else count_0++;
+    }
+    if(count_0 >= count_1) broadcast_message("[안내] 투표 결과 처형되지 않았습니다.\n",-1);
+    else{ 
+        players[vote_idx].alive = 0;
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[안내] 투표 결과 %s님이 처형되었습니다.\n", players[vote_idx].nickname);
+        broadcast_message(msg,-1);
+        remove_player(players[vote_idx].fd);        
     }
 }
 
@@ -187,7 +206,7 @@ void* game_loop(void* arg) {
             int elapsed = 0;
             pthread_mutex_unlock(&game_mutex); // 낮 시작 시 바로 뮤텍스 해제
             while (elapsed < 600) { // 0.2초 * 600 = 120초(2분)
-                usleep(200000); // 0.2초
+                usleep(2000); // 0.2초
                 pthread_mutex_lock(&game_mutex);
                 if (phase != PHASE_DAY) {
                     pthread_mutex_unlock(&game_mutex);
@@ -201,10 +220,36 @@ void* game_loop(void* arg) {
             pthread_mutex_lock(&game_mutex); // 낮 끝나고 다시 뮤텍스 획득
             phase = PHASE_VOTE;
             reset_votes();
-            broadcast_alive("[안내] 투표 시간입니다. 처형할 플레이어 번호를 입력하세요.\n");
+            broadcast_alive("[안내] 투표 시간입니다. 플레이어 번호를 입력하세요.\n");
             print_player();
         } else if (phase == PHASE_VOTE && all_votes_done()) {
-            process_vote();
+            vote_ret = process_vote();
+            if (vote_ret>=0) phase = PHASE_ARG;
+            else phase = PHASE_NIGHT;
+        } 
+        else if(phase == PHASE_ARG){
+            char msg[128];
+            snprintf(msg, sizeof(msg), "[안내] 최후 변론 시간입니다. %s 님은 10초간 최후 변론하세요.\n", players[vote_ret].nickname);
+            broadcast_alive(msg);
+
+            int elapsed = 0;
+            pthread_mutex_unlock(&game_mutex); // 낮 시작 시 바로 뮤텍스 해제
+            while (elapsed < 50) { // 0.2초 * 50 = 10초
+                usleep(200000); // 0.2초
+                pthread_mutex_lock(&game_mutex);
+                if (phase != PHASE_ARG) {
+                    pthread_mutex_unlock(&game_mutex);
+                    break;
+                }
+                pthread_mutex_unlock(&game_mutex);
+                elapsed++;
+            }
+            phase = PHASE_FINAL_VOTE;
+            reset_votes();
+            broadcast_alive("[안내] 최종 투표 시간입니다 살린다(0), 죽인다(1)을 입력하세요.\n");
+        } 
+        else if(phase == PHASE_FINAL_VOTE && all_votes_done()){
+            process_final_vote(vote_ret);
             int alive_arr[MAX_CLIENTS];
             for (size_t i = 0; i < num_players; ++i) alive_arr[i] = players[i].alive;
             int mafia = 0, citizen = 0;
@@ -230,7 +275,7 @@ void* game_loop(void* arg) {
                         send_to_player(i, "[행동] 밤입니다. 살릴 플레이어 번호를 입력하세요.\n");
                 }
             }
-        } else if (phase == PHASE_END) {
+        }else if (phase == PHASE_END) {
             broadcast_message("[안내] 게임이 종료되었습니다.\n",-1);
             pthread_mutex_unlock(&game_mutex);
             break;
@@ -277,13 +322,22 @@ void* handle_client(void* arg) {
             char send_buf[300];
             snprintf(send_buf, sizeof(send_buf), "[%s] %s\n", players[my_idx].nickname, msg_buf);
             broadcast_message(send_buf, -1); // 모든 클라이언트에게 전송
-        } else if (phase == PHASE_VOTE) {
+        } else if(phase == PHASE_ARG){
+
+            if(client_fd == players[vote_ret].fd)
+            {
+                 char send_buf[300];
+                 snprintf(send_buf, sizeof(send_buf), "[%s] %s\n", players[my_idx].nickname, msg_buf);
+                broadcast_message(send_buf, -1); // 모든 클라이언트에게 전송
+            }
+            
+        }else if (phase == PHASE_VOTE || phase == PHASE_FINAL_VOTE) {
             int vote_idx = atoi(msg_buf);
             if (vote_idx >= 0 && vote_idx < (int)num_players && players[vote_idx].alive) {
                 players[my_idx].vote = vote_idx;
                 vote_done[my_idx] = true;
             }
-        }
+        } 
         pthread_mutex_unlock(&game_mutex);
     }
     remove_player(client_fd);

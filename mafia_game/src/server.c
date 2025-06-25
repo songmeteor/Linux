@@ -206,15 +206,11 @@ void* game_loop(void* arg) {
             int elapsed = 0;
             pthread_mutex_unlock(&game_mutex); // 낮 시작 시 바로 뮤텍스 해제
             while (elapsed < 600) { // 0.2초 * 600 = 120초(2분)
-                usleep(2000); // 0.2초
+                usleep(200000); // 0.2초
                 pthread_mutex_lock(&game_mutex);
-                if (phase != PHASE_DAY) {
-                    pthread_mutex_unlock(&game_mutex);
-                    break;
-                }
-                pthread_mutex_unlock(&game_mutex);
                 if(elapsed == 300) broadcast_alive("\n ❗️투표까지 1분 남았습니다❗️\n");
                 if(elapsed == 450) broadcast_alive("\n ❗️투표까지 30초 남았습니다❗️\n");
+                pthread_mutex_unlock(&game_mutex);
                 elapsed++;
             }
             pthread_mutex_lock(&game_mutex); // 낮 끝나고 다시 뮤텍스 획득
@@ -236,14 +232,9 @@ void* game_loop(void* arg) {
             pthread_mutex_unlock(&game_mutex); // 낮 시작 시 바로 뮤텍스 해제
             while (elapsed < 50) { // 0.2초 * 50 = 10초
                 usleep(200000); // 0.2초
-                pthread_mutex_lock(&game_mutex);
-                if (phase != PHASE_ARG) {
-                    pthread_mutex_unlock(&game_mutex);
-                    break;
-                }
-                pthread_mutex_unlock(&game_mutex);
                 elapsed++;
             }
+            pthread_mutex_lock(&game_mutex); 
             phase = PHASE_FINAL_VOTE;
             reset_votes();
             broadcast_alive("[안내] 최종 투표 시간입니다 살린다(0), 죽인다(1)을 입력하세요.\n");

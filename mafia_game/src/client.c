@@ -7,7 +7,7 @@
 #include "network.h"
 #include "utils.h"
 
-#define SERVER_IP "127.0.0.1"
+#define SERVER_IP "10.10.16.219"
 #define PORT      12345
 #define BUF_SIZE  512
 

@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <fcntl.h>  
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include "game.h"
@@ -30,6 +31,7 @@ static player_t players[MAX_CLIENTS];
 static size_t num_players = 0;
 static phase_t phase = PHASE_WAIT;
 static pthread_mutex_t game_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int lcd_fd = -1;  
 
 // 밤 행동 결과 저장용
 static int mafia_target = -1;
@@ -208,6 +210,12 @@ void* game_loop(void* arg) {
             while (elapsed < 600) { // 0.2초 * 600 = 120초(2분)
                 usleep(200000); // 0.2초
                 pthread_mutex_lock(&game_mutex);
+                if (lcd_fd >= 0) {
+                    int rem_sec = (600 - elapsed) / 5;
+                    char buf[17];
+                    snprintf(buf, sizeof(buf), "morning %3d", rem_sec);
+                    write(lcd_fd, buf, strlen(buf));
+                }
                 if(elapsed == 300) broadcast_alive("\n ❗️투표까지 1분 남았습니다❗️\n");
                 if(elapsed == 450) broadcast_alive("\n ❗️투표까지 30초 남았습니다❗️\n");
                 pthread_mutex_unlock(&game_mutex);
@@ -255,6 +263,11 @@ void* game_loop(void* arg) {
             } else {
                 phase = PHASE_NIGHT;
                 reset_night_actions();
+                if (lcd_fd >= 0) {
+                    char buf[17];
+                    snprintf(buf, sizeof(buf), "night wait...");
+                    write(lcd_fd, buf, strlen(buf));
+                }
                 broadcast_alive("[안내] 밤이 되었습니다. 마피아/경찰/의사는 행동을 입력하세요.\n");
                 print_player();
                 for (size_t i = 0; i < num_players; ++i) {
@@ -339,6 +352,13 @@ int main() {
     int listen_fd = create_server_socket(PORT, BACKLOG);
     if (listen_fd < 0) return 1;
     printf("Server listening on port %d (fd=%d)\n", PORT, listen_fd);
+
+    // LCD 디바이스 열기
+    lcd_fd = open("/dev/lcd_i2c", O_WRONLY);
+    if (lcd_fd < 0) {
+        perror("Failed to open /dev/lcd_i2c");
+        // 계속 실행해도 되지만 LCD 출력은 동작하지 않음
+    }
 
     // 게임 루프 스레드 생성
     pthread_t game_tid;
